@@ -844,6 +844,13 @@ def page_filings() -> None:
                         )
                     if diag["error"]:
                         st.error(diag["error"])
+                        if "네트워크" in str(diag["error"]) or "timed out" in str(diag["error"]).lower():
+                            st.info(
+                                "💡 **우회 방법**: 사이드바 → "
+                                "`📦 DART corp_map 업로드` 에서 로컬에서 받은 "
+                                "`CorpCode.zip` 또는 `corp_map.json` 을 업로드하세요. "
+                                "이후 공시 조회는 네트워크 없이 캐시로 동작합니다."
+                            )
                     elif diag.get("api_status") == "013":
                         st.warning("DART status 013 = 조회된 데이터가 없음. 종목/기간을 바꿔 보세요.")
                     elif diag.get("api_status") and diag["api_status"] != "000":
@@ -921,6 +928,36 @@ def main() -> None:
         key_in = st.text_input("DART 인증키", value=st.session_state.get("dart_api_key", ""), type="password")
         if key_in:
             st.session_state.dart_api_key = key_in
+
+    with st.sidebar.expander("📦 DART corp_map 업로드 (네트워크 차단 시)"):
+        status = dart.corp_map_status()
+        if status["size"]:
+            st.success(
+                f"✅ 캐시됨: {status['size']:,}개 매핑 "
+                f"(업데이트 {status['age_hours']:.1f}시간 전)"
+            )
+        else:
+            st.warning("❌ corp_map 캐시 없음 — 공시 조회 실패 시 아래에서 업로드하세요.")
+        st.caption(
+            "Streamlit Cloud 등에서 `opendart.fss.or.kr` 에 직접 연결이 막힐 때, "
+            "**로컬 PC** 에서 한 번 받아 업로드하면 이후 모든 조회가 캐시로 처리됩니다.\n\n"
+            "**받는 법 (택1)**:\n"
+            "1. 브라우저로 `https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=본인키` 열어서 다운로드 → "
+            "받아진 `CorpCode.zip` 그대로 업로드\n"
+            "2. 저장소의 `tools/build_corp_map.py` 실행 → 생성된 `corp_map.json` 업로드"
+        )
+        up = st.file_uploader(
+            "CorpCode.zip 또는 corp_map.json",
+            type=["zip", "json"],
+            key="corp_map_upload",
+        )
+        if up is not None:
+            try:
+                n, kind = dart.install_corp_map_from_bytes(up.read())
+                st.success(f"✅ {kind} 업로드 완료: {n:,}개 매핑 등록")
+                st.rerun()
+            except Exception as e:
+                st.error(f"업로드 실패: {e}")
     st.sidebar.divider()
     st.sidebar.caption(
         "데이터: 네이버 금융 / DART / pykrx (KRX)\n\n"

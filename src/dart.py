@@ -221,6 +221,63 @@ def _parse_corp_zip(content: bytes) -> dict[str, str]:
     return out
 
 
+def install_corp_map_from_bytes(data: bytes) -> tuple[int, str]:
+    """사용자가 업로드한 CorpCode.zip 또는 corp_map.json 바이트를 캐시에 설치.
+
+    Streamlit Cloud 등에서 DART 서버에 직접 연결이 막힐 때, 로컬에서 받은
+    파일을 업로드하면 이 함수로 캐시에 저장한다.
+
+    Returns: (등록된 매핑 수, 입력 형식 라벨).
+    Raises: ValueError 파싱 실패 시.
+    """
+    # JSON 형식 시도
+    try:
+        text = data.decode("utf-8")
+        if text.lstrip().startswith("{"):
+            obj = json.loads(text)
+            if not isinstance(obj, dict) or not obj:
+                raise ValueError("corp_map.json 이 비어 있거나 형식이 잘못되었습니다.")
+            cleaned: dict[str, str] = {}
+            for k, v in obj.items():
+                ks = str(k).strip()
+                vs = str(v).strip()
+                if ks and vs:
+                    cleaned[ks] = vs
+            if not cleaned:
+                raise ValueError("corp_map.json 에 유효한 매핑이 없습니다.")
+            CORP_MAP_PATH.write_text(
+                json.dumps(cleaned, ensure_ascii=False), encoding="utf-8"
+            )
+            return len(cleaned), "corp_map.json"
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        pass
+
+    # zip 형식 시도
+    try:
+        cmap = _parse_corp_zip(data)
+    except Exception as e:
+        raise ValueError(f"파일 형식을 인식할 수 없습니다 (zip/json 모두 실패): {e}") from e
+    if not cmap:
+        raise ValueError("CorpCode.zip 파싱은 됐지만 매핑이 비어 있습니다.")
+    CORP_ZIP_PATH.write_bytes(data)
+    CORP_MAP_PATH.write_text(json.dumps(cmap, ensure_ascii=False), encoding="utf-8")
+    return len(cmap), "CorpCode.zip"
+
+
+def corp_map_status() -> dict:
+    """현재 캐시 상태."""
+    info: dict = {"size": 0, "age_hours": None, "path": str(CORP_MAP_PATH)}
+    if CORP_MAP_PATH.exists():
+        try:
+            cmap = json.loads(CORP_MAP_PATH.read_text(encoding="utf-8"))
+            info["size"] = len(cmap)
+        except Exception:
+            pass
+        age = datetime.now() - datetime.fromtimestamp(CORP_MAP_PATH.stat().st_mtime)
+        info["age_hours"] = round(age.total_seconds() / 3600, 1)
+    return info
+
+
 def _load_corp_map(api_key: str, refresh_days: int = 7) -> dict[str, str]:
     """ticker → corp_code 매핑. 디스크 캐시 7일. 네트워크 실패 시 만료 캐시도 사용."""
     cached: dict[str, str] = {}
