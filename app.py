@@ -947,9 +947,10 @@ def main() -> None:
             "2. 저장소의 `tools/build_corp_map.py` 실행 → 생성된 `corp_map.json` 업로드"
         )
         up = st.file_uploader(
-            "CorpCode.zip 또는 corp_map.json",
-            type=["zip", "json"],
+            "CorpCode.zip / corp_map.json / corpCode (확장자 무관)",
+            type=None,
             key="corp_map_upload",
+            help="브라우저가 확장자 없이 'corpCode' 로 저장한 파일도 그대로 올리면 됩니다.",
         )
         if up is not None:
             try:

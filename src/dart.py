@@ -221,47 +221,102 @@ def _parse_corp_zip(content: bytes) -> dict[str, str]:
     return out
 
 
-def install_corp_map_from_bytes(data: bytes) -> tuple[int, str]:
-    """사용자가 업로드한 CorpCode.zip 또는 corp_map.json 바이트를 캐시에 설치.
+def _parse_corp_xml_text(xml_text: str) -> dict[str, str]:
+    root = ET.fromstring(xml_text)
+    out: dict[str, str] = {}
+    for child in root.findall("list"):
+        sc = (child.findtext("stock_code") or "").strip()
+        cc = (child.findtext("corp_code") or "").strip()
+        if sc and cc:
+            out[sc] = cc
+    return out
 
-    Streamlit Cloud 등에서 DART 서버에 직접 연결이 막힐 때, 로컬에서 받은
-    파일을 업로드하면 이 함수로 캐시에 저장한다.
+
+def install_corp_map_from_bytes(data: bytes) -> tuple[int, str]:
+    """사용자가 업로드한 파일(zip / json / xml) 바이트를 캐시에 설치.
+
+    파일 시그니처(매직바이트) 로 형식을 자동 판별 — 확장자 무관.
 
     Returns: (등록된 매핑 수, 입력 형식 라벨).
     Raises: ValueError 파싱 실패 시.
     """
-    # JSON 형식 시도
-    try:
-        text = data.decode("utf-8")
-        if text.lstrip().startswith("{"):
-            obj = json.loads(text)
-            if not isinstance(obj, dict) or not obj:
-                raise ValueError("corp_map.json 이 비어 있거나 형식이 잘못되었습니다.")
-            cleaned: dict[str, str] = {}
-            for k, v in obj.items():
-                ks = str(k).strip()
-                vs = str(v).strip()
-                if ks and vs:
-                    cleaned[ks] = vs
-            if not cleaned:
-                raise ValueError("corp_map.json 에 유효한 매핑이 없습니다.")
-            CORP_MAP_PATH.write_text(
-                json.dumps(cleaned, ensure_ascii=False), encoding="utf-8"
-            )
-            return len(cleaned), "corp_map.json"
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        pass
+    if not data:
+        raise ValueError("빈 파일입니다.")
 
-    # zip 형식 시도
-    try:
-        cmap = _parse_corp_zip(data)
-    except Exception as e:
-        raise ValueError(f"파일 형식을 인식할 수 없습니다 (zip/json 모두 실패): {e}") from e
-    if not cmap:
-        raise ValueError("CorpCode.zip 파싱은 됐지만 매핑이 비어 있습니다.")
-    CORP_ZIP_PATH.write_bytes(data)
-    CORP_MAP_PATH.write_text(json.dumps(cmap, ensure_ascii=False), encoding="utf-8")
-    return len(cmap), "CorpCode.zip"
+    # 1) zip 시그니처 PK\x03\x04
+    if data[:2] == b"PK":
+        try:
+            cmap = _parse_corp_zip(data)
+        except Exception as e:
+            raise ValueError(f"zip 파싱 실패: {e}") from e
+        if not cmap:
+            raise ValueError("zip 파싱은 됐지만 매핑이 비어 있습니다.")
+        CORP_ZIP_PATH.write_bytes(data)
+        CORP_MAP_PATH.write_text(json.dumps(cmap, ensure_ascii=False), encoding="utf-8")
+        return len(cmap), "CorpCode.zip"
+
+    # 텍스트로 디코드 (UTF-8 → CP949 → latin-1 폴백)
+    text: str | None = None
+    for enc in ("utf-8-sig", "utf-8", "cp949", "euc-kr", "latin-1"):
+        try:
+            text = data.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise ValueError("파일 인코딩을 인식할 수 없습니다.")
+
+    stripped = text.lstrip()
+
+    # 2) JSON 시도
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON 파싱 실패: {e}") from e
+        if not isinstance(obj, dict) or not obj:
+            raise ValueError("corp_map.json 이 비어 있거나 형식이 잘못되었습니다.")
+        cleaned: dict[str, str] = {}
+        for k, v in obj.items():
+            ks = str(k).strip()
+            vs = str(v).strip()
+            if ks and vs:
+                cleaned[ks] = vs
+        if not cleaned:
+            raise ValueError("corp_map.json 에 유효한 매핑이 없습니다.")
+        CORP_MAP_PATH.write_text(
+            json.dumps(cleaned, ensure_ascii=False), encoding="utf-8"
+        )
+        return len(cleaned), "corp_map.json"
+
+    # 3) XML 시도 (DART 가 키 오류 시 JSON 본문을 줄 때도 있어 한 번 더 체크)
+    if stripped.startswith("<"):
+        # DART 에러 응답이 XML 형식일 수도 있음
+        if "<status>" in text and "<message>" in text:
+            try:
+                root = ET.fromstring(text)
+                status = (root.findtext("status") or "").strip()
+                message = (root.findtext("message") or "").strip()
+                if status and status != "000":
+                    raise ValueError(
+                        f"DART API 에러 응답이 업로드됐습니다 (status={status}: {message}). "
+                        "키나 권한을 확인하고 다시 받으세요."
+                    )
+            except ET.ParseError:
+                pass
+        try:
+            cmap = _parse_corp_xml_text(text)
+        except ET.ParseError as e:
+            raise ValueError(f"XML 파싱 실패: {e}") from e
+        if not cmap:
+            raise ValueError("XML 파싱은 됐지만 매핑이 비어 있습니다.")
+        CORP_MAP_PATH.write_text(json.dumps(cmap, ensure_ascii=False), encoding="utf-8")
+        return len(cmap), "CorpCode.xml"
+
+    raise ValueError(
+        "파일 형식을 인식할 수 없습니다. zip / json / xml 중 하나여야 합니다. "
+        f"(앞 16바이트: {data[:16]!r})"
+    )
 
 
 def corp_map_status() -> dict:
