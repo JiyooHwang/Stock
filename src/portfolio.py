@@ -1,4 +1,11 @@
-"""보유 주식(포트폴리오) 관리 — JSON 파일 기반."""
+"""보유 주식(포트폴리오) 자료구조와 직렬화.
+
+웹 앱은 브라우저 세션(`st.session_state`)에 데이터를 보관하고
+import/export로 영구 저장한다 — 인스턴스를 공유하는 다른 방문자에게
+데이터가 새지 않게 하기 위함.
+
+`load_portfolio` / `save_portfolio`(파일 IO)는 로컬 CLI/스크립트용으로 남겨둔다.
+"""
 from __future__ import annotations
 
 import json
@@ -61,3 +68,23 @@ def upsert_holding(holdings: list[Holding], new: Holding) -> list[Holding]:
 
 def remove_holding(holdings: list[Holding], ticker: str) -> list[Holding]:
     return [h for h in holdings if h.ticker != ticker]
+
+
+def serialize(holdings: list[Holding]) -> str:
+    """JSON 문자열로 직렬화 (파일 다운로드용)."""
+    return json.dumps([asdict(h) for h in holdings], ensure_ascii=False, indent=2)
+
+
+def deserialize(text: str | bytes) -> list[Holding]:
+    """JSON 문자열/바이트를 Holding 리스트로 역직렬화."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8")
+    raw = json.loads(text)
+    if not isinstance(raw, list):
+        raise ValueError("올바른 포트폴리오 JSON이 아닙니다 (배열이어야 합니다).")
+    out: list[Holding] = []
+    for row in raw:
+        # 알 수 없는 필드는 무시
+        kwargs = {k: row[k] for k in ("ticker", "name", "quantity", "avg_price", "memo") if k in row}
+        out.append(Holding(**kwargs))
+    return out

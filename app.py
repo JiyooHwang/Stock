@@ -15,9 +15,9 @@ from src.charts import candle_with_waves
 from src.elliott_wave import best_analysis
 from src.portfolio import (
     Holding,
-    load_portfolio,
+    deserialize,
     remove_holding,
-    save_portfolio,
+    serialize,
     upsert_holding,
 )
 from src.risk import plan_risk
@@ -39,6 +39,16 @@ def cached_price(ticker: str) -> float | None:
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def cached_name(ticker: str) -> str:
     return dl.get_ticker_name(ticker)
+
+
+def _holdings() -> list[Holding]:
+    if "portfolio" not in st.session_state:
+        st.session_state.portfolio = []
+    return st.session_state.portfolio
+
+
+def _set_holdings(h: list[Holding]) -> None:
+    st.session_state.portfolio = h
 
 
 def _resolve_ticker(query: str) -> tuple[str, str] | None:
@@ -63,7 +73,42 @@ def _resolve_ticker(query: str) -> tuple[str, str] | None:
 
 def page_portfolio() -> None:
     st.header("내 포트폴리오")
-    holdings = load_portfolio()
+    st.caption(
+        "🔒 포트폴리오는 **본인 브라우저 세션에만** 저장되며 다른 방문자에게 공유되지 않습니다. "
+        "탭을 닫으면 사라지므로 영구 보관이 필요하면 아래에서 **다운로드** 받아 두세요."
+    )
+
+    with st.expander("📂 가져오기 / 내보내기", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            uploaded = st.file_uploader(
+                "포트폴리오 JSON 파일 가져오기", type=["json"], key="upload_pf",
+                help="이전에 다운로드한 portfolio.json 을 올리세요. 기존 세션 데이터는 덮어씁니다.",
+            )
+            if uploaded is not None:
+                try:
+                    new_holdings = deserialize(uploaded.read())
+                    _set_holdings(new_holdings)
+                    st.success(f"{len(new_holdings)}개 종목을 불러왔습니다.")
+                except Exception as e:
+                    st.error(f"파일을 읽지 못했습니다: {e}")
+        with c2:
+            current = _holdings()
+            if current:
+                st.download_button(
+                    "💾 현재 포트폴리오 다운로드 (JSON)",
+                    data=serialize(current),
+                    file_name="portfolio.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
+            else:
+                st.button("💾 다운로드 (보유 종목 없음)", disabled=True, use_container_width=True)
+            if st.button("🗑️ 세션 초기화", use_container_width=True):
+                _set_holdings([])
+                st.rerun()
+
+    holdings = _holdings()
 
     with st.expander("종목 추가 / 매수", expanded=not holdings):
         col1, col2, col3, col4 = st.columns([3, 2, 2, 3])
@@ -88,7 +133,7 @@ def page_portfolio() -> None:
                     holdings,
                     Holding(ticker=ticker, name=name, quantity=int(qty), avg_price=float(price), memo=memo),
                 )
-                save_portfolio(holdings)
+                _set_holdings(holdings)
                 st.success(f"{name}({ticker}) {qty}주 @ {price:,.0f}원 추가되었습니다.")
                 st.rerun()
 
@@ -156,7 +201,7 @@ def page_portfolio() -> None:
     )
     if st.button("삭제", type="secondary"):
         holdings = remove_holding(holdings, pick.ticker)
-        save_portfolio(holdings)
+        _set_holdings(holdings)
         st.success("삭제되었습니다.")
         st.rerun()
 
@@ -165,7 +210,7 @@ def page_wave() -> None:
     st.header("엘리엇 파동 분석")
     st.caption("⚠️ 휴리스틱 기반 보조 지표입니다 — 투자 판단의 절대적 근거가 될 수 없습니다.")
 
-    holdings = load_portfolio()
+    holdings = _holdings()
     options: list[tuple[str, str]] = [(h.ticker, h.name) for h in holdings]
 
     col1, col2 = st.columns([3, 1])
@@ -300,7 +345,7 @@ def page_scorecard() -> None:
             """
         )
 
-    holdings = load_portfolio()
+    holdings = _holdings()
     extra = st.text_input("추가로 점수 매길 종목(쉼표로 구분, 코드 또는 종목명)", value="")
 
     targets: list[tuple[str, str]] = [(h.ticker, h.name) for h in holdings]
@@ -402,7 +447,7 @@ def page_backtest() -> None:
     st.header("백테스트 — 추세 + 모멘텀")
     st.caption("규칙: 종가 > 200일 이평선 AND 12개월 모멘텀 > 0 일 때 long, 아니면 현금. 시그널 lag=1, 거래비용 0.1%.")
 
-    holdings = load_portfolio()
+    holdings = _holdings()
     options: list[tuple[str, str]] = [(h.ticker, h.name) for h in holdings]
 
     c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
@@ -487,7 +532,7 @@ def page_risk() -> None:
     with c3:
         atr_mult = st.number_input("ATR 배수", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
 
-    holdings = load_portfolio()
+    holdings = _holdings()
     rows = []
     if holdings:
         st.subheader("보유 종목 손절 플랜")
@@ -560,8 +605,9 @@ def main() -> None:
     )
     st.sidebar.divider()
     st.sidebar.caption(
-        "데이터: pykrx (KRX)\n\n"
-        "포트폴리오는 `data/portfolio.json` 에 저장됩니다."
+        "데이터: 네이버 금융 / pykrx (KRX)\n\n"
+        "🔒 포트폴리오는 본인 브라우저 세션에만 저장됩니다.\n"
+        "탭을 닫으면 사라지므로 \"가져오기/내보내기\"로 백업하세요."
     )
     {
         "내 포트폴리오": page_portfolio,
