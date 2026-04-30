@@ -10,7 +10,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src import data_loader as dl
-from src.backtest import run_backtest
+from src import dart, naver_extras
+from src.backtest import run_backtest, run_walkforward
+from src.benchmark import INDICES, detect_market, load_index_ohlcv, perf_summary, relative_performance
 from src.charts import candle_with_waves
 from src.elliott_wave import best_analysis
 from src.portfolio import (
@@ -19,6 +21,12 @@ from src.portfolio import (
     remove_holding,
     serialize,
     upsert_holding,
+)
+from src.portfolio_optim import (
+    daily_returns,
+    equal_weight,
+    portfolio_metrics,
+    risk_parity_weights,
 )
 from src.risk import plan_risk
 from src.signals import explain_score, score_ticker
@@ -369,6 +377,8 @@ def page_scorecard() -> None:
             continue
         s = score_ticker(df, ticker)
         score_cache[ticker] = s
+        cur_p = cached_price(ticker)
+        consensus = naver_extras.fetch_consensus(ticker, current_price=cur_p)
         rows.append(
             {
                 "종목": f"{name} ({ticker})",
@@ -382,6 +392,8 @@ def page_scorecard() -> None:
                 "12개월 수익(%)": round(s.detail.get("mom.12m%", 0), 1),
                 "PER": round(s.detail.get("val.PER", 0), 1),
                 "연 변동성(%)": round(s.detail.get("vol.ann_vol%", 0), 1),
+                "목표가": round(consensus.target_price, 0) if consensus and consensus.target_price else None,
+                "상승여력(%)": round(consensus.upside_pct, 1) if consensus and consensus.upside_pct is not None else None,
             }
         )
         progress.progress(i / len(targets))
@@ -403,6 +415,7 @@ def page_scorecard() -> None:
         "추세": "{:.1f}", "모멘텀": "{:.1f}", "밸류에이션": "{:.1f}",
         "변동성": "{:.1f}", "종합": "{:.1f}",
         "12개월 수익(%)": "{:+.1f}", "PER": "{:.1f}", "연 변동성(%)": "{:.1f}",
+        "목표가": "{:,.0f}", "상승여력(%)": "{:+.1f}",
     }
     st.dataframe(
         display_df.style.map(_sig_style, subset=["신호"]).format(fmt),
@@ -516,6 +529,36 @@ def page_backtest() -> None:
             hide_index=True, use_container_width=True,
         )
 
+    st.divider()
+    st.subheader("⏱️ 시기별 분할 백테스트 (워크포워드)")
+    st.caption(
+        "전체 기간을 여러 시간대로 쪼개서 룰의 일관성을 본다. "
+        "특정 시기에만 작동하는 룰은 과적합 의심 신호. "
+        "*우리 룰은 학습 파라미터가 없으므로 엄밀한 워크포워드는 아니지만, 시기별 안정성 진단에 유용.*"
+    )
+    cwf1, cwf2 = st.columns(2)
+    with cwf1:
+        wf_train = st.number_input("학습기간(년) — 룰 적용 컨텍스트", min_value=1, max_value=8, value=3, key="wf_train")
+    with cwf2:
+        wf_test = st.number_input("검증기간(년) — 한 슬라이스", min_value=1, max_value=5, value=1, key="wf_test")
+
+    wf_df = run_walkforward(
+        df,
+        train_years=int(wf_train),
+        test_years=int(wf_test),
+        ma_window=int(ma_window),
+        momentum_window=int(mom_window),
+    )
+    if wf_df.empty:
+        st.info("백테스트에 충분한 데이터가 없습니다 (기간을 줄여 보세요).")
+    else:
+        st.dataframe(wf_df, hide_index=True, use_container_width=True)
+        wins = (wf_df["전략(%)"] > wf_df["매수후보유(%)"]).sum()
+        st.caption(
+            f"전체 {len(wf_df)}개 시기 중 **{wins}개**에서 전략이 매수후보유를 이겼습니다 "
+            f"(평균 초과수익 {wf_df['초과수익(%)'].mean():+.2f}%)."
+        )
+
 
 def page_risk() -> None:
     st.header("리스크 관리 — ATR 손절가 & 포지션 사이징")
@@ -597,23 +640,266 @@ def page_risk() -> None:
         )
 
 
+def page_market() -> None:
+    st.header("시장 비교 & 포트폴리오 자산배분")
+    st.caption(
+        "보유 종목을 KOSPI/KOSDAQ 등 지수와 비교하고, 변동성 기반 권장 비중(리스크 패리티)을 계산합니다."
+    )
+
+    holdings = _holdings()
+
+    tab1, tab2 = st.tabs(["📈 종목 vs 지수", "⚖️ 리스크 패리티 비중"])
+
+    with tab1:
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            options = [(h.ticker, h.name) for h in holdings]
+            if options:
+                pick = st.selectbox("종목", options, format_func=lambda x: f"{x[1]} ({x[0]})", key="mk_pick")
+                ticker, name = pick
+            else:
+                q = st.text_input("종목명 또는 6자리 코드", value="삼성전자", key="mk_q")
+                resolved = _resolve_ticker(q) if q else None
+                if not resolved:
+                    st.stop()
+                ticker, name = resolved
+        with col2:
+            years = st.slider("기간(년)", 1, 10, 3, key="mk_years")
+        with col3:
+            market_hint = detect_market(ticker)
+            default_idx = 0 if market_hint == "KOSPI" else 1 if market_hint == "KOSDAQ" else 0
+            index_label = st.selectbox("벤치마크", list(INDICES.keys()), index=default_idx, key="mk_idx")
+
+        df_stock = cached_ohlcv(ticker, years)
+        df_index = load_index_ohlcv(INDICES[index_label], years=years)
+        if df_stock.empty or df_index.empty:
+            st.error("데이터 부족")
+            return
+
+        rel = relative_performance(df_stock, df_index)
+        if rel.empty:
+            st.error("공통 기간이 없습니다.")
+            return
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=rel.index, y=rel["Stock"], name=name, line=dict(color="#d24f45", width=2)))
+        fig.add_trace(go.Scatter(x=rel.index, y=rel["Index"], name=index_label, line=dict(color="#1f77b4", width=2)))
+        fig.update_layout(
+            title=f"{name} vs {index_label} (시작 = 100)",
+            height=450, template="plotly_white",
+            margin=dict(l=20, r=20, t=50, b=20),
+            yaxis_title="누적 (시작=100)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        s = perf_summary(df_stock, df_index)
+        if s:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("종목 수익률", f"{s['종목 수익률(%)']:+.2f}%")
+            m2.metric(f"{index_label} 수익률", f"{s['지수 수익률(%)']:+.2f}%")
+            m3.metric("초과수익", f"{s['초과수익(%)']:+.2f}%")
+            if s["초과수익(%)"] > 0:
+                st.success(f"📈 {name}이(가) {index_label}을(를) {s['초과수익(%)']:.1f}%p 앞섰습니다.")
+            else:
+                st.warning(f"📉 {name}이(가) {index_label}을(를) {abs(s['초과수익(%)']):.1f}%p 뒤졌습니다.")
+
+    with tab2:
+        st.markdown(
+            "**리스크 패리티**: 변동성이 큰 종목엔 작은 비중을, 안정적인 종목엔 큰 비중을 줘서 "
+            "전체 위험을 분산시키는 방법입니다. (월가 헤지펀드의 표준 전략 중 하나)"
+        )
+        if len(holdings) < 2:
+            st.info("리스크 패리티는 종목이 2개 이상일 때 의미가 있습니다. 보유 종목을 추가하세요.")
+            return
+
+        years = st.slider("계산 기간(년)", 1, 5, 2, key="rp_years")
+        with st.spinner("종목별 시계열 로딩..."):
+            price_dict = {}
+            for h in holdings:
+                d = cached_ohlcv(h.ticker, years)
+                if not d.empty:
+                    price_dict[h.ticker] = d["Close"]
+
+        if len(price_dict) < 2:
+            st.error("계산 가능한 종목이 부족합니다.")
+            return
+
+        prices = pd.DataFrame(price_dict).dropna()
+        rets = daily_returns(prices)
+        rp_w = risk_parity_weights(rets)
+        eq_w = equal_weight(list(rp_w.index))
+        cur_value: dict[str, float] = {}
+        total_val = 0.0
+        for h in holdings:
+            if h.ticker in rp_w.index:
+                cur = cached_price(h.ticker) or h.avg_price
+                v = h.quantity * cur
+                cur_value[h.ticker] = v
+                total_val += v
+        cur_w = pd.Series({t: v / total_val for t, v in cur_value.items()}) if total_val else pd.Series()
+
+        name_map = {h.ticker: h.name for h in holdings}
+        rows = []
+        for t in rp_w.index:
+            ann_vol = rets[t].std() * (252 ** 0.5) * 100
+            rows.append(
+                {
+                    "종목": f"{name_map.get(t, t)} ({t})",
+                    "연 변동성(%)": round(ann_vol, 2),
+                    "현재 비중(%)": round(cur_w.get(t, 0) * 100, 2) if not cur_w.empty else None,
+                    "동일가중(%)": round(eq_w[t] * 100, 2),
+                    "리스크패리티(%)": round(rp_w[t] * 100, 2),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+        st.subheader("백테스트 비교 (지난 N년)")
+        rp_metrics = portfolio_metrics(rets, rp_w)
+        eq_metrics = portfolio_metrics(rets, eq_w)
+        cur_metrics = portfolio_metrics(rets, cur_w) if not cur_w.empty else {}
+        compare_rows = []
+        for k in ("총수익률(%)", "CAGR(%)", "변동성(%)", "Sharpe", "MDD(%)"):
+            compare_rows.append(
+                {
+                    "지표": k,
+                    "현재 비중": cur_metrics.get(k),
+                    "동일가중": eq_metrics.get(k),
+                    "리스크패리티": rp_metrics.get(k),
+                }
+            )
+        st.dataframe(pd.DataFrame(compare_rows), hide_index=True, use_container_width=True)
+        st.caption(
+            "리스크패리티 비중은 권장값일 뿐입니다. "
+            "변동성 기반이라 적은 종목·짧은 기간엔 안정성이 떨어질 수 있어요."
+        )
+
+
+def page_filings() -> None:
+    st.header("공시 & 뉴스")
+    st.caption(
+        "DART 공시(공식)와 네이버 뉴스 헤드라인. "
+        "DART는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 API 키 발급 후 사이드바에 입력하세요."
+    )
+
+    holdings = _holdings()
+    options = [(h.ticker, h.name) for h in holdings]
+
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        if options:
+            mode = st.radio("종목 선택", ["보유 종목", "직접 입력"], horizontal=True, key="fl_mode")
+        else:
+            mode = "직접 입력"
+        if mode == "보유 종목" and options:
+            pick = st.selectbox("종목", options, format_func=lambda x: f"{x[1]} ({x[0]})", key="fl_pick")
+            ticker, name = pick
+        else:
+            q = st.text_input("종목명 또는 6자리 코드", value="삼성전자", key="fl_q")
+            resolved = _resolve_ticker(q) if q else None
+            if not resolved:
+                st.stop()
+            ticker, name = resolved
+    with col2:
+        days = st.slider("공시 조회기간(일)", 7, 180, 60, key="fl_days")
+
+    api_key = st.session_state.get("dart_api_key") or None
+
+    tab_dart, tab_news, tab_target = st.tabs(["📑 DART 공시", "📰 뉴스", "🎯 컨센서스 목표가"])
+
+    with tab_dart:
+        if not api_key and not dart._get_key():
+            st.warning(
+                "DART API 키가 설정되지 않았습니다. "
+                "사이드바 'DART 키' 입력란에 키를 넣으면 공시 목록이 표시됩니다."
+            )
+        else:
+            with st.spinner(f"DART 공시 조회 중 ({name})..."):
+                df_filings = dart.list_disclosures(ticker, days=int(days), api_key=api_key)
+            if df_filings.empty:
+                st.info("최근 공시가 없거나 조회에 실패했습니다.")
+            else:
+                df_show = df_filings.copy()
+                df_show["접수일"] = df_show["접수일"].dt.strftime("%Y-%m-%d")
+                st.dataframe(
+                    df_show,
+                    column_config={
+                        "URL": st.column_config.LinkColumn("바로가기", display_text="🔗 열기"),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                st.caption(f"총 {len(df_filings)}건 — 최근 {days}일 기준")
+
+    with tab_news:
+        with st.spinner("뉴스 헤드라인 로딩..."):
+            df_news = naver_extras.fetch_news(ticker, max_items=20)
+        if df_news.empty:
+            st.info("뉴스를 가져오지 못했습니다 (네이버 차단 또는 데이터 없음).")
+        else:
+            df_show = df_news.copy()
+            st.dataframe(
+                df_show,
+                column_config={
+                    "URL": st.column_config.LinkColumn("기사", display_text="🔗 읽기"),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    with tab_target:
+        cur = cached_price(ticker)
+        c = naver_extras.fetch_consensus(ticker, current_price=cur)
+        if c is None:
+            st.info("이 종목의 컨센서스 정보를 찾지 못했습니다 (소형주는 누락될 수 있습니다).")
+        else:
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("현재가", f"{cur:,.0f}원" if cur else "-")
+            mc2.metric("목표주가", f"{c.target_price:,.0f}원" if c.target_price else "-")
+            mc3.metric(
+                "상승여력",
+                f"{c.upside_pct:+.2f}%" if c.upside_pct is not None else "-",
+            )
+            mc4.metric("투자의견", f"{c.opinion or '-'} ({c.opinion_score:.2f})" if c.opinion_score else "-")
+            st.caption("출처: 네이버 금융 컨센서스 (애널리스트 추정치 평균)")
+
+
 def main() -> None:
     st.sidebar.title("📈 KRX 도구")
     page = st.sidebar.radio(
         "메뉴",
-        ["내 포트폴리오", "종목 점수판", "백테스트", "리스크 관리", "엘리엇 파동 분석"],
+        [
+            "내 포트폴리오",
+            "종목 점수판",
+            "시장 비교",
+            "백테스트",
+            "리스크 관리",
+            "공시 & 뉴스",
+            "엘리엇 파동 분석",
+        ],
     )
     st.sidebar.divider()
+    with st.sidebar.expander("⚙️ DART API 키 (선택)"):
+        st.markdown(
+            "[opendart.fss.or.kr](https://opendart.fss.or.kr) 에서 무료 가입 후 발급. "
+            "설정하면 공시 페이지가 활성화됩니다. "
+            "키는 본인 세션에만 저장되고 서버에 영구 저장되지 않습니다."
+        )
+        key_in = st.text_input("DART 인증키", value=st.session_state.get("dart_api_key", ""), type="password")
+        if key_in:
+            st.session_state.dart_api_key = key_in
+    st.sidebar.divider()
     st.sidebar.caption(
-        "데이터: 네이버 금융 / pykrx (KRX)\n\n"
+        "데이터: 네이버 금융 / DART / pykrx (KRX)\n\n"
         "🔒 포트폴리오는 본인 브라우저 세션에만 저장됩니다.\n"
         "탭을 닫으면 사라지므로 \"가져오기/내보내기\"로 백업하세요."
     )
     {
         "내 포트폴리오": page_portfolio,
         "종목 점수판": page_scorecard,
+        "시장 비교": page_market,
         "백테스트": page_backtest,
         "리스크 관리": page_risk,
+        "공시 & 뉴스": page_filings,
         "엘리엇 파동 분석": page_wave,
     }[page]()
 

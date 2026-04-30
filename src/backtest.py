@@ -110,3 +110,64 @@ def run_backtest(
         metrics["평균 수익률(%)"] = float(trades["수익률(%)"].mean())
 
     return BacktestResult(equity=equity, benchmark=benchmark, trades=trades, metrics=metrics)
+
+
+def run_walkforward(
+    df: pd.DataFrame,
+    train_years: int = 3,
+    test_years: int = 1,
+    ma_window: int = 200,
+    momentum_window: int = 252,
+    cost_bps: float = 10.0,
+) -> pd.DataFrame:
+    """시기별 분할 백테스트 — 시간 구간을 나눠 룰의 일관성을 본다.
+
+    이 룰은 학습 파라미터가 없으므로 엄밀한 워크포워드는 아니다. 단,
+    시기마다 성과가 어떻게 다른지(특정 시기에만 작동하는지) 진단할 수 있다.
+
+    각 슬라이스의 성과를 매수후보유 대비 비교해 행으로 반환한다.
+    """
+    if len(df) < (train_years + test_years) * 252:
+        return pd.DataFrame()
+
+    splits: list[dict] = []
+    start_date = df.index[0]
+    end_date = df.index[-1]
+    cur_test_start = start_date + pd.DateOffset(years=train_years)
+
+    while cur_test_start + pd.DateOffset(years=test_years) <= end_date:
+        test_end = cur_test_start + pd.DateOffset(years=test_years)
+        # MA/모멘텀 lookback 위해 전체 history를 넣고, test 구간만 잘라낸다
+        sub = df.loc[:test_end]
+        if len(sub) < max(ma_window, momentum_window) + 5:
+            cur_test_start += pd.DateOffset(years=test_years)
+            continue
+        try:
+            res = run_backtest(sub, ma_window=ma_window, momentum_window=momentum_window, cost_bps=cost_bps)
+        except ValueError:
+            cur_test_start += pd.DateOffset(years=test_years)
+            continue
+
+        eq_slice = res.equity.loc[cur_test_start:test_end]
+        bench_slice = res.benchmark.loc[cur_test_start:test_end]
+        if len(eq_slice) < 5 or len(bench_slice) < 5:
+            cur_test_start += pd.DateOffset(years=test_years)
+            continue
+
+        eq_norm = eq_slice / eq_slice.iloc[0]
+        bench_norm = bench_slice / bench_slice.iloc[0]
+        strat_ret = (eq_norm.iloc[-1] - 1) * 100
+        bench_ret = (bench_norm.iloc[-1] - 1) * 100
+
+        splits.append(
+            {
+                "기간": f"{cur_test_start:%Y-%m} ~ {test_end:%Y-%m}",
+                "전략(%)": round(strat_ret, 2),
+                "매수후보유(%)": round(bench_ret, 2),
+                "초과수익(%)": round(strat_ret - bench_ret, 2),
+                "전략 우세": "✅" if strat_ret > bench_ret else "❌",
+            }
+        )
+        cur_test_start += pd.DateOffset(years=test_years)
+
+    return pd.DataFrame(splits)
