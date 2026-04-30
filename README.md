@@ -1,9 +1,40 @@
 # KRX 포트폴리오 & 엘리엇 파동 예측
 
-한국 주식(KRX) 보유 종목을 관리하고, 지난 N년치 일봉 데이터로 **엘리엇 파동**을 검출하여
-다음 파동의 **피보나치 목표가**를 계산해 주는 Streamlit 웹앱.
+> 👉 **앱 바로 열기**: <https://jiyoohwang-stock.streamlit.app> *(아래 "배포하기" 1회 진행 후 동작)*
+>
+> [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/deploy?repository=JiyooHwang/Stock&branch=main&mainModule=app.py)
+
+한국 주식(KRX) 보유 종목을 관리하고, 추세·모멘텀·밸류에이션·변동성 점수와 엘리엇 파동
+피보나치 목표가까지 한 화면에서 보여 주는 Streamlit 웹앱.
 
 > ⚠️ 본 도구는 결정론적 휴리스틱 기반 보조 신호이며, 투자 판단의 근거가 될 수 없습니다.
+
+## 🚀 배포하기 (1회 · 3분)
+
+GitHub 저장소를 누르면 README가 먼저 보이지만, 한 번만 배포해 두면 그 다음부터는
+**위 "Open in Streamlit" 배지**를 눌러 바로 앱이 열립니다.
+
+1. <https://share.streamlit.io> 접속 → **GitHub 계정으로 로그인**
+2. **"Create app"** → **"Deploy a public app from GitHub"**
+3. 다음 값을 입력하고 **Deploy** 클릭:
+   - Repository: `JiyooHwang/Stock`
+   - Branch: `main`
+   - Main file path: `app.py`
+   - (선택) App URL: `jiyoohwang-stock` ← 위 README 링크와 맞추려면 이 슬러그 사용
+4. 1~2분 기다리면 `https://<슬러그>.streamlit.app` 에서 앱이 뜹니다
+5. 배포 후 코드를 `main` 에 푸시하면 **자동으로 재배포**됩니다 (별도 작업 X)
+
+> 슬러그를 다르게 정했다면 위 README 첫 줄의 URL을 그것으로 수정하세요.
+
+## 로컬 실행
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+브라우저에서 `http://localhost:8501` 접속. 같은 네트워크의 친구와 공유하려면
+`streamlit run app.py --server.address 0.0.0.0` 후 본인 PC IP로 접속.
 
 ## 기능
 
@@ -19,33 +50,27 @@
   - 다음 파동의 피보나치 확장/되돌림 목표가 제시
 - **인터랙티브 캔들 차트**(Plotly) + 파동 라벨 + 목표가 라인
 
-## 실행
-
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-브라우저에서 `http://localhost:8501` 접속.
-
-## 친구와 공유
-
-1. **간단**: 같은 네트워크라면 `streamlit run app.py --server.address 0.0.0.0` 후 본인 PC IP로 접속
-2. **추천**: 이 저장소를 GitHub에 두고 [Streamlit Community Cloud](https://streamlit.io/cloud)에 무료 배포
-   - 단, 무료 플랜은 포트폴리오가 호스트와 함께 휘발됩니다 — 친구와 데이터 공유가 필요하면
-     `data/portfolio.json` 을 GitHub에 올리거나 별도 DB(Supabase 등)로 마이그레이션 필요
-
 ## 데이터 소스
 
 - [pykrx](https://github.com/sharebook-kr/pykrx) — KRX KOSPI/KOSDAQ 일봉 OHLCV
 - 시세는 6시간 캐시(`data/cache/`), 포트폴리오 현재가는 30분 캐시
 - NXT(넥스트레이드) 단독 시세는 미지원 — KRX 통합 시세를 사용합니다
 
+## 데이터 영속성 주의
+
+Streamlit Community Cloud 무료 플랜은 인스턴스 재시작 시 파일이 휘발됩니다.
+포트폴리오를 영구 보존하려면:
+- **간단**: `data/portfolio.json` 을 GitHub 저장소에 직접 커밋해 두기
+- **추천**: Supabase / Google Sheets API 등 외부 저장소로 이전 (필요하면 작업 가능)
+
 ## 폴더 구조
 
 ```
 .
 ├── app.py                  Streamlit 진입점
+├── .streamlit/
+│   └── config.toml         테마/서버 설정
+├── runtime.txt             Python 버전 핀 (Streamlit Cloud용)
 ├── src/
 │   ├── data_loader.py      pykrx 시세 로더 + 캐시
 │   ├── elliott_wave.py     ZigZag + 파동 라벨링 + 피보나치 목표가
