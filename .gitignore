@@ -8,5 +8,6 @@ venv/
 .streamlit/secrets.toml
 data/portfolio.json
 data/cache/
+data/cache/naver/
 .idea/
 .vscode/
