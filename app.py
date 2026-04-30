@@ -836,6 +836,12 @@ def page_filings() -> None:
                         st.markdown(f"**API status**: `{diag['api_status'] or '-'}`")
                         st.markdown(f"**API message**: {diag['api_message'] or '-'}")
                         st.markdown(f"**조회 건수**: {diag['filings_count'] if diag['filings_count'] is not None else '-'}")
+                    if "corp_xml_http" in diag:
+                        st.markdown(
+                            f"**corpCode.xml 응답**: HTTP `{diag['corp_xml_http']}` · "
+                            f"`{diag.get('corp_xml_content_type', '')}` · "
+                            f"`{diag.get('corp_xml_size_bytes', 0):,}` bytes"
+                        )
                     if diag["error"]:
                         st.error(diag["error"])
                     elif diag.get("api_status") == "013":

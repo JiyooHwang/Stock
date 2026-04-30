@@ -77,18 +77,61 @@ def diagnose(ticker: str, api_key: str | None = None) -> dict:
     info["key_found"] = True
     info["key_preview"] = f"{key[:4]}...{key[-4:]} (길이 {len(key)})"
 
-    try:
-        cmap = _load_corp_map(key)
-        info["corp_map_size"] = len(cmap)
-    except Exception as e:
-        info["error"] = f"corpCode.xml 로드 실패: {e}"
-        return info
+    # 캐시된 corp_map을 먼저 보고, 비었으면 직접 fetch해서 응답 검사
+    cmap: dict[str, str] = {}
+    if CORP_MAP_PATH.exists():
+        try:
+            cmap = json.loads(CORP_MAP_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
 
     if not cmap:
-        info["error"] = (
-            "corpCode.xml 다운로드 실패. 키가 잘못됐거나 DART 서버 일시 장애 가능. "
-            "키 앞뒤 공백/따옴표 포함 여부를 확인하세요."
-        )
+        # 직접 fetch해서 DART가 무슨 응답을 주는지 확인
+        try:
+            import requests
+            r = requests.get(
+                f"{DART_BASE}/corpCode.xml", params={"crtfc_key": key}, timeout=20
+            )
+            info["corp_xml_http"] = r.status_code
+            info["corp_xml_content_type"] = r.headers.get("Content-Type", "")
+            info["corp_xml_size_bytes"] = len(r.content)
+            # DART는 키 오류 시 JSON 응답을 200으로 준다
+            text_preview = r.text[:200] if isinstance(r.text, str) else ""
+            if text_preview.strip().startswith("{"):
+                try:
+                    data = r.json()
+                    info["error"] = (
+                        f"DART corpCode.xml 응답 status={data.get('status')}: "
+                        f"{data.get('message')}"
+                    )
+                    return info
+                except Exception:
+                    pass
+            if r.status_code != 200:
+                info["error"] = f"corpCode.xml HTTP {r.status_code}"
+                return info
+            # zip 파싱 시도
+            try:
+                z = zipfile.ZipFile(io.BytesIO(r.content))
+                xml_text = z.read(z.namelist()[0]).decode("utf-8")
+                root = ET.fromstring(xml_text)
+                cmap = {}
+                for child in root.findall("list"):
+                    sc = (child.findtext("stock_code") or "").strip()
+                    cc = (child.findtext("corp_code") or "").strip()
+                    if sc and cc:
+                        cmap[sc] = cc
+                CORP_MAP_PATH.write_text(json.dumps(cmap, ensure_ascii=False), encoding="utf-8")
+            except Exception as e:
+                info["error"] = f"corpCode.xml 파싱 실패: {e} (응답 미리보기: {text_preview[:100]})"
+                return info
+        except Exception as e:
+            info["error"] = f"corpCode.xml 네트워크 오류: {e}"
+            return info
+
+    info["corp_map_size"] = len(cmap)
+    if not cmap:
+        info["error"] = "corp_map이 비어 있습니다."
         return info
 
     info["corp_code"] = cmap.get(ticker)
