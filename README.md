@@ -1,8 +1,6 @@
 # KRX 포트폴리오 & 엘리엇 파동 예측
 
 > 👉 **앱 바로 열기**: <https://jiyoohwang-stock.streamlit.app> *(아래 "배포하기" 1회 진행 후 동작)*
->
-> [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/deploy?repository=JiyooHwang/Stock&branch=main&mainModule=app.py)
 
 한국 주식(KRX) 보유 종목을 관리하고, 추세·모멘텀·밸류에이션·변동성 점수와 엘리엇 파동
 피보나치 목표가까지 한 화면에서 보여 주는 Streamlit 웹앱.
@@ -11,20 +9,18 @@
 
 ## 🚀 배포하기 (1회 · 3분)
 
-GitHub 저장소를 누르면 README가 먼저 보이지만, 한 번만 배포해 두면 그 다음부터는
-**위 "Open in Streamlit" 배지**를 눌러 바로 앱이 열립니다.
-
-1. <https://share.streamlit.io> 접속 → **GitHub 계정으로 로그인**
-2. **"Create app"** → **"Deploy a public app from GitHub"**
-3. 다음 값을 입력하고 **Deploy** 클릭:
+1. <https://share.streamlit.io> 직접 접속 → **Continue with GitHub** 로그인
+2. GitHub OAuth 권한 요청이 뜨면 **Authorize streamlit** 클릭
+3. **Create app** → **Deploy a public app from GitHub** 선택
+4. 폼 입력 후 **Deploy**:
    - Repository: `JiyooHwang/Stock`
    - Branch: `main`
    - Main file path: `app.py`
-   - (선택) App URL: `jiyoohwang-stock` ← 위 README 링크와 맞추려면 이 슬러그 사용
-4. 1~2분 기다리면 `https://<슬러그>.streamlit.app` 에서 앱이 뜹니다
-5. 배포 후 코드를 `main` 에 푸시하면 **자동으로 재배포**됩니다 (별도 작업 X)
+   - App URL: `jiyoohwang-stock` (README 첫 줄 링크와 맞추려면 이 슬러그 사용)
+5. 1~2분 후 `https://<슬러그>.streamlit.app` 에서 앱이 뜹니다
+6. 이후 `main` 에 푸시하면 **자동 재배포**
 
-> 슬러그를 다르게 정했다면 위 README 첫 줄의 URL을 그것으로 수정하세요.
+> 슬러그를 다르게 정했다면 README 첫 줄의 URL을 그것으로 수정하세요.
 
 ## 로컬 실행
 
