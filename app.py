@@ -810,13 +810,41 @@ def page_filings() -> None:
         if not api_key and not dart._get_key():
             st.warning(
                 "DART API 키가 설정되지 않았습니다. "
-                "사이드바 'DART 키' 입력란에 키를 넣으면 공시 목록이 표시됩니다."
+                "사이드바 'DART 키' 입력란에 키를 넣거나 Streamlit Cloud Secrets에 "
+                "`OPEN_DART_KEY` 를 설정하세요."
             )
         else:
             with st.spinner(f"DART 공시 조회 중 ({name})..."):
                 df_filings = dart.list_disclosures(ticker, days=int(days), api_key=api_key)
             if df_filings.empty:
                 st.info("최근 공시가 없거나 조회에 실패했습니다.")
+                with st.expander("🔬 진단 정보 보기 (어디서 막혔는지 확인)", expanded=True):
+                    with st.spinner("진단 중..."):
+                        diag = dart.diagnose(ticker, api_key=api_key)
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown(f"**키 발견**: {'✅' if diag['key_found'] else '❌'}")
+                        st.markdown(f"**키 출처**: `{diag['key_source']}`")
+                        if diag["key_preview"]:
+                            st.markdown(f"**키 미리보기**: `{diag['key_preview']}`")
+                        st.markdown(
+                            f"**corp_map 크기**: "
+                            f"{diag['corp_map_size'] if diag['corp_map_size'] is not None else '-'}"
+                        )
+                    with c2:
+                        st.markdown(f"**corp_code 매핑**: `{diag['corp_code'] or '없음'}`")
+                        st.markdown(f"**API status**: `{diag['api_status'] or '-'}`")
+                        st.markdown(f"**API message**: {diag['api_message'] or '-'}")
+                        st.markdown(f"**조회 건수**: {diag['filings_count'] if diag['filings_count'] is not None else '-'}")
+                    if diag["error"]:
+                        st.error(diag["error"])
+                    elif diag.get("api_status") == "013":
+                        st.warning("DART status 013 = 조회된 데이터가 없음. 종목/기간을 바꿔 보세요.")
+                    elif diag.get("api_status") and diag["api_status"] != "000":
+                        st.warning(
+                            f"DART status {diag['api_status']}: {diag['api_message']}. "
+                            "키 오류(010/011), 한도초과(020) 등이 의심됩니다."
+                        )
             else:
                 df_show = df_filings.copy()
                 df_show["접수일"] = df_show["접수일"].dt.strftime("%Y-%m-%d")

@@ -42,6 +42,84 @@ def _get_key(explicit: str | None = None) -> str | None:
         return None
 
 
+def diagnose(ticker: str, api_key: str | None = None) -> dict:
+    """공시 조회 실패 시 어디서 막혔는지 단계별로 진단."""
+    info: dict = {
+        "key_found": False,
+        "key_source": "없음",
+        "key_preview": None,
+        "corp_map_size": None,
+        "corp_code": None,
+        "api_status": None,
+        "api_message": None,
+        "filings_count": None,
+        "error": None,
+    }
+    if api_key:
+        key = api_key
+        info["key_source"] = "사이드바 입력"
+    elif os.environ.get("OPEN_DART_KEY"):
+        key = os.environ.get("OPEN_DART_KEY")
+        info["key_source"] = "환경변수 OPEN_DART_KEY"
+    else:
+        try:
+            import streamlit as st
+            key = st.secrets.get("OPEN_DART_KEY")
+            if key:
+                info["key_source"] = "Streamlit Cloud Secrets"
+        except Exception:
+            key = None
+
+    if not key:
+        info["error"] = "API 키를 찾지 못했습니다. Secrets 또는 사이드바를 확인하세요."
+        return info
+
+    info["key_found"] = True
+    info["key_preview"] = f"{key[:4]}...{key[-4:]} (길이 {len(key)})"
+
+    try:
+        cmap = _load_corp_map(key)
+        info["corp_map_size"] = len(cmap)
+    except Exception as e:
+        info["error"] = f"corpCode.xml 로드 실패: {e}"
+        return info
+
+    if not cmap:
+        info["error"] = (
+            "corpCode.xml 다운로드 실패. 키가 잘못됐거나 DART 서버 일시 장애 가능. "
+            "키 앞뒤 공백/따옴표 포함 여부를 확인하세요."
+        )
+        return info
+
+    info["corp_code"] = cmap.get(ticker)
+    if not info["corp_code"]:
+        info["error"] = f"ticker {ticker} 이(가) corpCode 매핑에 없습니다 (상장폐지/종목코드 오타 가능)."
+        return info
+
+    try:
+        import requests
+        end = datetime.now()
+        start = end - timedelta(days=90)
+        r = requests.get(
+            f"{DART_BASE}/list.json",
+            params={
+                "crtfc_key": key,
+                "corp_code": info["corp_code"],
+                "bgn_de": start.strftime("%Y%m%d"),
+                "end_de": end.strftime("%Y%m%d"),
+                "page_count": 100,
+            },
+            timeout=10,
+        )
+        data = r.json()
+        info["api_status"] = data.get("status")
+        info["api_message"] = data.get("message")
+        info["filings_count"] = len(data.get("list", []))
+    except Exception as e:
+        info["error"] = f"list.json 호출 실패: {e}"
+    return info
+
+
 def _load_corp_map(api_key: str, refresh_days: int = 7) -> dict[str, str]:
     """ticker → corp_code 매핑. 디스크 캐시 7일."""
     if CORP_MAP_PATH.exists():
