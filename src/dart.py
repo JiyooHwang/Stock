@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import time
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,38 @@ DART_BASE = "https://opendart.fss.or.kr/api"
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache" / "dart"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CORP_MAP_PATH = CACHE_DIR / "corp_map.json"
+CORP_ZIP_PATH = CACHE_DIR / "CorpCode.zip"
+
+# DART 서버는 한국에서 호스팅되어 해외(예: Streamlit Cloud)에서 첫 연결이 느릴 수 있다.
+# 또한 corpCode.xml.zip 이 ~5MB 라 read 도 오래 걸린다.
+_CONNECT_TIMEOUT = 60
+_READ_TIMEOUT_SMALL = 30
+_READ_TIMEOUT_LARGE = 180
+
+_UA = (
+    "Mozilla/5.0 (compatible; KRX-Portfolio/1.0; +https://github.com/jiyoohwang/stock)"
+)
+
+
+def _http_get(url: str, *, params: dict | None = None, timeout: tuple[int, int],
+              retries: int = 3, stream: bool = False):
+    """requests.get with retries on connection/timeout errors."""
+    import requests
+    headers = {"User-Agent": _UA, "Accept": "*/*"}
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return requests.get(
+                url, params=params, timeout=timeout, headers=headers, stream=stream
+            )
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)  # 1s, 2s, 4s
+            continue
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("unreachable")
 
 
 def _get_key(explicit: str | None = None) -> str | None:
@@ -86,11 +119,25 @@ def diagnose(ticker: str, api_key: str | None = None) -> dict:
             pass
 
     if not cmap:
+        # 디스크에 zip 캐시가 있다면 그것부터 시도
+        if CORP_ZIP_PATH.exists():
+            try:
+                cmap = _parse_corp_zip(CORP_ZIP_PATH.read_bytes())
+                if cmap:
+                    CORP_MAP_PATH.write_text(
+                        json.dumps(cmap, ensure_ascii=False), encoding="utf-8"
+                    )
+            except Exception:
+                pass
+
+    if not cmap:
         # 직접 fetch해서 DART가 무슨 응답을 주는지 확인
         try:
-            import requests
-            r = requests.get(
-                f"{DART_BASE}/corpCode.xml", params={"crtfc_key": key}, timeout=20
+            r = _http_get(
+                f"{DART_BASE}/corpCode.xml",
+                params={"crtfc_key": key},
+                timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT_LARGE),
+                retries=3,
             )
             info["corp_xml_http"] = r.status_code
             info["corp_xml_content_type"] = r.headers.get("Content-Type", "")
@@ -112,21 +159,19 @@ def diagnose(ticker: str, api_key: str | None = None) -> dict:
                 return info
             # zip 파싱 시도
             try:
-                z = zipfile.ZipFile(io.BytesIO(r.content))
-                xml_text = z.read(z.namelist()[0]).decode("utf-8")
-                root = ET.fromstring(xml_text)
-                cmap = {}
-                for child in root.findall("list"):
-                    sc = (child.findtext("stock_code") or "").strip()
-                    cc = (child.findtext("corp_code") or "").strip()
-                    if sc and cc:
-                        cmap[sc] = cc
+                cmap = _parse_corp_zip(r.content)
+                CORP_ZIP_PATH.write_bytes(r.content)
                 CORP_MAP_PATH.write_text(json.dumps(cmap, ensure_ascii=False), encoding="utf-8")
             except Exception as e:
                 info["error"] = f"corpCode.xml 파싱 실패: {e} (응답 미리보기: {text_preview[:100]})"
                 return info
         except Exception as e:
-            info["error"] = f"corpCode.xml 네트워크 오류: {e}"
+            info["error"] = (
+                f"corpCode.xml 네트워크 오류 (3회 재시도 후 실패): {e}. "
+                "DART 서버는 한국에 위치해 해외 호스팅(Streamlit Cloud 등)에서 "
+                "연결이 막히거나 매우 느릴 수 있습니다. 잠시 뒤 다시 시도하거나 "
+                "로컬 환경에서 한 번 실행해 corp_map 캐시를 만들어 두세요."
+            )
             return info
 
     info["corp_map_size"] = len(cmap)
@@ -140,10 +185,9 @@ def diagnose(ticker: str, api_key: str | None = None) -> dict:
         return info
 
     try:
-        import requests
         end = datetime.now()
         start = end - timedelta(days=90)
-        r = requests.get(
+        r = _http_get(
             f"{DART_BASE}/list.json",
             params={
                 "crtfc_key": key,
@@ -152,7 +196,8 @@ def diagnose(ticker: str, api_key: str | None = None) -> dict:
                 "end_de": end.strftime("%Y%m%d"),
                 "page_count": 100,
             },
-            timeout=10,
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT_SMALL),
+            retries=3,
         )
         data = r.json()
         info["api_status"] = data.get("status")
@@ -163,40 +208,70 @@ def diagnose(ticker: str, api_key: str | None = None) -> dict:
     return info
 
 
+def _parse_corp_zip(content: bytes) -> dict[str, str]:
+    z = zipfile.ZipFile(io.BytesIO(content))
+    xml_text = z.read(z.namelist()[0]).decode("utf-8")
+    root = ET.fromstring(xml_text)
+    out: dict[str, str] = {}
+    for child in root.findall("list"):
+        stock_code = (child.findtext("stock_code") or "").strip()
+        corp_code = (child.findtext("corp_code") or "").strip()
+        if stock_code and corp_code:
+            out[stock_code] = corp_code
+    return out
+
+
 def _load_corp_map(api_key: str, refresh_days: int = 7) -> dict[str, str]:
-    """ticker → corp_code 매핑. 디스크 캐시 7일."""
+    """ticker → corp_code 매핑. 디스크 캐시 7일. 네트워크 실패 시 만료 캐시도 사용."""
+    cached: dict[str, str] = {}
+    cache_age_days: float | None = None
     if CORP_MAP_PATH.exists():
-        age = datetime.now() - datetime.fromtimestamp(CORP_MAP_PATH.stat().st_mtime)
-        if age < timedelta(days=refresh_days):
-            try:
-                return json.loads(CORP_MAP_PATH.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+        cache_age_days = (
+            datetime.now() - datetime.fromtimestamp(CORP_MAP_PATH.stat().st_mtime)
+        ).total_seconds() / 86400
+        try:
+            cached = json.loads(CORP_MAP_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            cached = {}
+        if cache_age_days < refresh_days and cached:
+            return cached
+
+    # zip 파일도 캐시 (파싱은 성공했지만 JSON 쓰기 실패했을 때 등 복구용)
+    if not cached and CORP_ZIP_PATH.exists():
+        try:
+            cached = _parse_corp_zip(CORP_ZIP_PATH.read_bytes())
+            if cached:
+                CORP_MAP_PATH.write_text(
+                    json.dumps(cached, ensure_ascii=False), encoding="utf-8"
+                )
+                return cached
+        except Exception:
+            pass
 
     try:
-        import requests
-        r = requests.get(f"{DART_BASE}/corpCode.xml", params={"crtfc_key": api_key}, timeout=20)
+        r = _http_get(
+            f"{DART_BASE}/corpCode.xml",
+            params={"crtfc_key": api_key},
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT_LARGE),
+            retries=3,
+        )
         r.raise_for_status()
     except Exception:
-        return {}
+        # 네트워크 실패 시 만료된 캐시라도 있으면 반환
+        return cached
 
     try:
-        z = zipfile.ZipFile(io.BytesIO(r.content))
-        xml_text = z.read(z.namelist()[0]).decode("utf-8")
+        out = _parse_corp_zip(r.content)
     except Exception:
-        return {}
+        return cached
 
-    out: dict[str, str] = {}
+    if not out:
+        return cached
+
     try:
-        root = ET.fromstring(xml_text)
-        for child in root.findall("list"):
-            stock_code = (child.findtext("stock_code") or "").strip()
-            corp_code = (child.findtext("corp_code") or "").strip()
-            if stock_code and corp_code:
-                out[stock_code] = corp_code
+        CORP_ZIP_PATH.write_bytes(r.content)
     except Exception:
-        return {}
-
+        pass
     try:
         CORP_MAP_PATH.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
     except Exception:
@@ -222,8 +297,7 @@ def list_disclosures(ticker: str, days: int = 60, api_key: str | None = None) ->
     end = datetime.now()
     start = end - timedelta(days=days)
     try:
-        import requests
-        r = requests.get(
+        r = _http_get(
             f"{DART_BASE}/list.json",
             params={
                 "crtfc_key": key,
@@ -232,7 +306,8 @@ def list_disclosures(ticker: str, days: int = 60, api_key: str | None = None) ->
                 "end_de": end.strftime("%Y%m%d"),
                 "page_count": 100,
             },
-            timeout=10,
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT_SMALL),
+            retries=3,
         )
         data = r.json()
     except Exception:
@@ -267,8 +342,7 @@ def get_quarterly_financials(
     if not reprt_code:
         return pd.DataFrame()
     try:
-        import requests
-        r = requests.get(
+        r = _http_get(
             f"{DART_BASE}/fnlttSinglAcntAll.json",
             params={
                 "crtfc_key": key,
@@ -277,7 +351,8 @@ def get_quarterly_financials(
                 "reprt_code": reprt_code,
                 "fs_div": "CFS",  # 연결재무제표
             },
-            timeout=10,
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT_SMALL),
+            retries=3,
         )
         data = r.json()
     except Exception:
