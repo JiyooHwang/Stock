@@ -21,7 +21,7 @@ from src.portfolio import (
     upsert_holding,
 )
 from src.risk import plan_risk
-from src.signals import score_ticker
+from src.signals import explain_score, score_ticker
 
 st.set_page_config(page_title="KRX 포트폴리오 & 엘리엇 파동", layout="wide")
 
@@ -256,10 +256,45 @@ def page_wave() -> None:
 
 def page_scorecard() -> None:
     st.header("종목 점수판")
-    st.caption(
-        "추세(35%) · 모멘텀(30%) · 밸류에이션(20%) · 변동성(15%) 가중평균. "
-        "0~100 종합점수, 70+ 매수 / 40~70 관망 / 40- 매도."
+    st.markdown(
+        "각 종목을 **4가지 관점**에서 0\\~100점으로 평가하고 가중평균해서 종합점수를 냅니다.  \n"
+        "종합 **70점 이상은 🟢 매수**, **40\\~70점은 🟡 관망**, **40점 미만은 🔴 매도** 신호입니다."
     )
+
+    with st.expander("📖 점수판 사용법 — 처음이라면 꼭 읽어보세요", expanded=False):
+        st.markdown(
+            """
+**1. 추세 (35% · 가장 중요)**
+- 주가가 **200일 평균선 위**에 있나요? 위면 ↑ 점수, 아래면 ↓ 점수
+- **50일선 > 200일선** (골든크로스) 이면 추가 가산점
+- 200일선과 너무 멀어지면 과열, 너무 가까우면 추세 약화
+- *왜 중요?* 학계에서 가장 잘 검증된 신호. 추세를 거스르지 마세요.
+
+**2. 모멘텀 (30%)**
+- **최근 12개월 수익률**이 핵심. 6개월·3개월 수익률도 본다
+- 많이 오른 종목은 단기간 더 오를 가능성이 통계적으로 높음 (관성효과, Jegadeesh-Titman)
+- 12개월 +30% 이상이면 강한 상승, -20% 이하면 큰 하락
+
+**3. 밸류에이션 (20%) — "비싼가 싼가"**
+- **PER이 낮을수록 싸다** (8 이하 만점, 30 이상 0점)
+- **PBR도 낮을수록 좋음** (0.8 이하 만점)
+- **배당수익률**이 높으면 가산점
+- ⚠️ 적자기업이나 성장주는 PER이 의미 없거나 비정상적으로 보일 수 있음
+
+**4. 변동성 (15%) — "얼마나 출렁이나"**
+- 연환산 변동성이 **20% 이하면 안정적**, 60% 이상이면 위험
+- 변동성이 크면 수익도 크지만 손실도 클 수 있어요
+- 큰 손실을 피하려면 변동성이 너무 높은 종목은 피하는 게 안전
+
+---
+
+**🔍 신호의 한계 — 꼭 알아두세요**
+- 단일 점수가 매수/매도를 결정하는 게 아닙니다. **각 항목 점수 분포를 보세요.**
+- "종합 75점이지만 변동성 0점" 이면 진입 타이밍을 짧게 잡거나 비중을 줄이는 게 안전
+- "종합 60점이지만 추세 100점" 이면 추세를 따라가도 됨 (모멘텀이 약하지만 추세는 강함)
+- 재무 데이터가 없으면 밸류에이션은 50점(중립)으로 처리됩니다
+            """
+        )
 
     holdings = load_portfolio()
     extra = st.text_input("추가로 점수 매길 종목(쉼표로 구분, 코드 또는 종목명)", value="")
@@ -275,6 +310,7 @@ def page_scorecard() -> None:
         return
 
     rows = []
+    score_cache: dict[str, object] = {}
     progress = st.progress(0.0, text="점수 계산 중...")
     for i, (ticker, name) in enumerate(targets, 1):
         df = cached_ohlcv(ticker, 3)
@@ -283,24 +319,27 @@ def page_scorecard() -> None:
             progress.progress(i / len(targets))
             continue
         s = score_ticker(df, ticker)
+        score_cache[ticker] = s
         rows.append(
             {
                 "종목": f"{name} ({ticker})",
+                "_ticker": ticker,
                 "추세": round(s.trend, 1),
                 "모멘텀": round(s.momentum, 1),
-                "변동성": round(s.volatility, 1),
                 "밸류에이션": round(s.valuation, 1),
+                "변동성": round(s.volatility, 1),
                 "종합": round(s.composite, 1),
                 "신호": s.signal,
-                "12m수익(%)": round(s.detail.get("mom.12m%", 0), 1),
+                "12개월 수익(%)": round(s.detail.get("mom.12m%", 0), 1),
                 "PER": round(s.detail.get("val.PER", 0), 1),
-                "연변동성(%)": round(s.detail.get("vol.ann_vol%", 0), 1),
+                "연 변동성(%)": round(s.detail.get("vol.ann_vol%", 0), 1),
             }
         )
         progress.progress(i / len(targets))
     progress.empty()
 
     df_score = pd.DataFrame(rows).sort_values(by="종합", ascending=False, na_position="last")
+    display_df = df_score.drop(columns=[c for c in ["_ticker"] if c in df_score.columns])
 
     def _sig_style(val):
         if val == "매수":
@@ -311,15 +350,45 @@ def page_scorecard() -> None:
             return "background-color: #fff3cd; color: #856404;"
         return ""
 
+    fmt = {
+        "추세": "{:.1f}", "모멘텀": "{:.1f}", "밸류에이션": "{:.1f}",
+        "변동성": "{:.1f}", "종합": "{:.1f}",
+        "12개월 수익(%)": "{:+.1f}", "PER": "{:.1f}", "연 변동성(%)": "{:.1f}",
+    }
     st.dataframe(
-        df_score.style.map(_sig_style, subset=["신호"]),
+        display_df.style.map(_sig_style, subset=["신호"]).format(fmt),
         use_container_width=True,
         hide_index=True,
     )
 
+    st.divider()
+    st.subheader("🔎 종목별 자세히 보기")
+    for _, row in df_score.iterrows():
+        ticker = row.get("_ticker")
+        if not ticker or ticker not in score_cache:
+            continue
+        s = score_cache[ticker]
+        signal_emoji = {"매수": "🟢", "관망": "🟡", "매도": "🔴"}.get(s.signal, "⚪")
+        with st.expander(
+            f"{signal_emoji} {row['종목']}  —  종합 {s.composite:.1f}점 · {s.signal}",
+            expanded=False,
+        ):
+            explain = explain_score(s)
+            cols = st.columns(4)
+            cols[0].metric("추세", f"{s.trend:.0f}점")
+            cols[1].metric("모멘텀", f"{s.momentum:.0f}점")
+            cols[2].metric("밸류에이션", f"{s.valuation:.0f}점")
+            cols[3].metric("변동성", f"{s.volatility:.0f}점")
+            st.markdown(f"**추세**: {explain['추세']}")
+            st.markdown(f"**모멘텀**: {explain['모멘텀']}")
+            st.markdown(f"**밸류에이션**: {explain['밸류에이션']}")
+            st.markdown(f"**변동성**: {explain['변동성']}")
+            st.info(explain["종합"])
+
     st.caption(
         "💡 종합 신호는 단일 절대 답이 아닙니다. 추세·모멘텀이 함께 양호할 때 가장 신뢰할 수 있고, "
-        "밸류에이션은 성장주에서 과도하게 낮게 나올 수 있습니다."
+        "밸류에이션은 성장주에서 과도하게 낮게 나올 수 있습니다. "
+        "재무 데이터가 없는 종목은 밸류에이션 50점(중립)으로 처리됩니다."
     )
 
 

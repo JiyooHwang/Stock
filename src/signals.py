@@ -28,6 +28,91 @@ class Score:
     detail: dict[str, float]
 
 
+def explain_score(s: "Score") -> dict[str, str]:
+    """각 점수가 왜 그렇게 나왔는지 일반인용 한글 설명."""
+    d = s.detail
+    out: dict[str, str] = {}
+
+    # 추세
+    price = d.get("trend.price")
+    ma200 = d.get("trend.MA200")
+    ma50 = d.get("trend.MA50")
+    gap = d.get("trend.gap%")
+    if price is not None and ma200 is not None:
+        above200 = price > ma200
+        golden = ma50 is not None and ma50 > ma200
+        parts = []
+        parts.append("📈 200일선 위에 있음 (상승 추세)" if above200 else "📉 200일선 아래 (하락 추세)")
+        if ma50 is not None:
+            parts.append("골든크로스 (50일선이 200일선 위)" if golden else "데드크로스 (50일선이 200일선 아래)")
+        if gap is not None:
+            parts.append(f"200일선 대비 {gap:+.1f}% 이격")
+        out["추세"] = " · ".join(parts)
+    else:
+        out["추세"] = "데이터 부족"
+
+    # 모멘텀
+    r12 = d.get("mom.12m%")
+    r6 = d.get("mom.6m%")
+    r3 = d.get("mom.3m%")
+    if r12 is not None:
+        if r12 > 30:
+            tag = "🚀 매우 강한 상승"
+        elif r12 > 0:
+            tag = "↗️ 완만한 상승"
+        elif r12 > -20:
+            tag = "↘️ 약한 하락"
+        else:
+            tag = "⛔ 큰 하락"
+        out["모멘텀"] = f"{tag} · 12개월 {r12:+.1f}% / 6개월 {r6:+.1f}% / 3개월 {r3:+.1f}%"
+    else:
+        out["모멘텀"] = "데이터 부족"
+
+    # 변동성
+    vol = d.get("vol.ann_vol%")
+    if vol is not None:
+        if vol < 25:
+            tag = "🟢 안정적"
+        elif vol < 40:
+            tag = "🟡 보통"
+        else:
+            tag = "🔴 변동성 큼"
+        out["변동성"] = f"{tag} · 연 변동성 {vol:.1f}% (낮을수록 안전)"
+    else:
+        out["변동성"] = "데이터 부족"
+
+    # 밸류에이션
+    per = d.get("val.PER")
+    pbr = d.get("val.PBR")
+    div = d.get("val.DIV%")
+    if per is not None:
+        if per <= 0:
+            tag = "⚠️ 적자(PER 음수) — 평가 보류"
+        elif per < 10:
+            tag = "💰 저평가 영역"
+        elif per < 20:
+            tag = "🟡 적정 평가"
+        else:
+            tag = "💸 고평가"
+        parts = [tag, f"PER {per:.1f}"]
+        if pbr:
+            parts.append(f"PBR {pbr:.2f}")
+        if div:
+            parts.append(f"배당수익률 {div:.2f}%")
+        out["밸류에이션"] = " · ".join(parts)
+    else:
+        out["밸류에이션"] = "재무 데이터 없음 (중립 처리)"
+
+    # 종합
+    if s.composite >= 70:
+        out["종합"] = "🟢 매수 — 추세·모멘텀이 양호하고 큰 위험 신호 없음"
+    elif s.composite >= 40:
+        out["종합"] = "🟡 관망 — 일부 지표는 좋지만 다른 지표가 발목을 잡음"
+    else:
+        out["종합"] = "🔴 매도 — 추세 약화 또는 고평가/고변동성 신호"
+    return out
+
+
 WEIGHTS = {"trend": 0.35, "momentum": 0.30, "volatility": 0.15, "valuation": 0.20}
 
 
