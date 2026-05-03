@@ -418,7 +418,7 @@ def page_scorecard() -> None:
         "목표가": "{:,.0f}", "상승여력(%)": "{:+.1f}",
     }
     st.dataframe(
-        display_df.style.map(_sig_style, subset=["신호"]).format(fmt),
+        display_df.style.map(_sig_style, subset=["신호"]).format(fmt, na_rep="-"),
         use_container_width=True,
         hide_index=True,
     )
