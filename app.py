@@ -121,7 +121,7 @@ def page_portfolio() -> None:
     with st.expander("종목 추가 / 매수", expanded=not holdings):
         col1, col2, col3, col4 = st.columns([3, 2, 2, 3])
         with col1:
-            q = st.text_input("종목명 또는 6자리 코드", key="add_q")
+            q = st.text_input("6자리 종목 코드 (예: 005930)", key="add_q")
         with col2:
             qty = st.number_input("수량", min_value=1, step=1, value=1, key="add_qty")
         with col3:
@@ -235,7 +235,7 @@ def page_wave() -> None:
             )
             ticker, name = pick
         else:
-            q = st.text_input("종목명 또는 6자리 코드", value="삼성전자")
+            q = st.text_input("6자리 종목 코드 (예: 005930)", value="005930")
             resolved = _resolve_ticker(q) if q else None
             if not resolved:
                 st.stop()
@@ -354,7 +354,7 @@ def page_scorecard() -> None:
         )
 
     holdings = _holdings()
-    extra = st.text_input("추가로 점수 매길 종목(쉼표로 구분, 코드 또는 종목명)", value="")
+    extra = st.text_input("추가로 점수 매길 종목 (6자리 코드, 쉼표로 구분)", value="")
 
     targets: list[tuple[str, str]] = [(h.ticker, h.name) for h in holdings]
     for q in [s.strip() for s in extra.split(",") if s.strip()]:
@@ -473,7 +473,7 @@ def page_backtest() -> None:
             pick = st.selectbox("종목", options, format_func=lambda x: f"{x[1]} ({x[0]})", key="bt_pick")
             ticker, name = pick
         else:
-            q = st.text_input("종목명 또는 6자리 코드", value="삼성전자", key="bt_q")
+            q = st.text_input("6자리 종목 코드 (예: 005930)", value="005930", key="bt_q")
             resolved = _resolve_ticker(q) if q else None
             if not resolved:
                 st.stop()
@@ -614,7 +614,7 @@ def page_risk() -> None:
     st.subheader("새 진입 시뮬레이션")
     cc1, cc2 = st.columns([3, 1])
     with cc1:
-        q = st.text_input("종목명 또는 코드", value="삼성전자", key="risk_q")
+        q = st.text_input("6자리 종목 코드 (예: 005930)", value="005930", key="risk_q")
     with cc2:
         entry = st.number_input("예상 진입가(원)", min_value=0.0, value=0.0, step=100.0, key="risk_entry")
 
@@ -658,7 +658,7 @@ def page_market() -> None:
                 pick = st.selectbox("종목", options, format_func=lambda x: f"{x[1]} ({x[0]})", key="mk_pick")
                 ticker, name = pick
             else:
-                q = st.text_input("종목명 또는 6자리 코드", value="삼성전자", key="mk_q")
+                q = st.text_input("6자리 종목 코드 (예: 005930)", value="005930", key="mk_q")
                 resolved = _resolve_ticker(q) if q else None
                 if not resolved:
                     st.stop()
@@ -794,7 +794,7 @@ def page_filings() -> None:
             pick = st.selectbox("종목", options, format_func=lambda x: f"{x[1]} ({x[0]})", key="fl_pick")
             ticker, name = pick
         else:
-            q = st.text_input("종목명 또는 6자리 코드", value="삼성전자", key="fl_q")
+            q = st.text_input("6자리 종목 코드 (예: 005930)", value="005930", key="fl_q")
             resolved = _resolve_ticker(q) if q else None
             if not resolved:
                 st.stop()
